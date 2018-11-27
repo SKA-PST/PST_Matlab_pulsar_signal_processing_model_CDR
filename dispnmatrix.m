@@ -46,7 +46,7 @@ if direc ~= -1 && direc ~= 1,
     disp('Warning: direc can only be 1 or -1');
 end;
 
-direc
+direc;
  
 % Vector of frequency bin assignments. Note that the highest frequency
 % bin is assigned a value of frange(2)-df where frange(2) is the Nyquist
