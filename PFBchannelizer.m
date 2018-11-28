@@ -11,6 +11,7 @@ function PFBchannelizer()
 % -------
 %
 % fname_in  - Input filename
+% headerFile - A dada-style pulsar signal header file
 % fname_pfb - PFB prototype filter coefficients filename
 %
 % SETTINGS
@@ -36,14 +37,14 @@ function PFBchannelizer()
 %
 % fname_out - Output filename
 %
-% Ignores the header section.
-%
 % Changes:
 % --------
 %
 % Author           Date         Comments
 % ---------------  -----------  ----------------------------------------
 % I. Morrison      31-Jul-2015  Original version
+% R. Willcox       07-Sep-2018  Added Over-Sampling factor
+%                               Added Header read and write
 %
 % ----------------------------------------------------------------------
  
@@ -56,49 +57,105 @@ fname_in = 'simulated_pulsar.dump';
 %fname_out = 'cs_channelized_pulsar.dump';
 fname_out = 'os_channelized_pulsar.dump';
 
+% Clear out the output file
+    % Various pieces append at different points, 
+    % so this ensures that the file starts clean every time
+fid_out = fopen(fname_out, 'w');
+fclose(fid_out); 
+
+% Header name
+headerFile = 'gen.header'; 
+
+
 %=======================================
 % PFB parameters
 
 % Define globals common also to CS_PFB() / OS_PFB() sub-functions
 global L; global Nu; global M; global L_M; global fname_pfb;
 
-% Number of channels in filter-bank
-L= 8;
+%=============
+% Default settings for variables that might be found in a header file
+
+hdrsize = 4096; % Header size 
+npol = 2; % Number of polarizations (should always be 2 when calc Stokes) 
+
+% Set bandwidth - default is 8 x 10 MHz, for testing with 8-channel channelizer
+f_sample_in = 80; % Sampling frequency of input (MHz)
+
+% Multiplying factor going from input to output type
+dformat = 'complextoreal'; %specifies conversion TO real or complex data
+%dformat = 'complextocomplex'; %specifies conversion TO real or complex data
 
 % PFB type
 pfb_type = 1; % 0 for critically sampled, 1 for oversampled
-
 % OverSampling
 Nu = 8; %Numerator
 De = 7; %Denominator
 
-if pfb_type == 0,
-    Os = 1;
-else
-    Os = Nu/De; % Oversampling factor
-end;
-M = L/Os; % Commutator Length
-L_M = L-M; % Overlap
 
-% PFB prototype filter coefficients file name
-%fname_pfb = 'CS_Prototype_FIR_8.mat';
-fname_pfb = 'OS_Prototype_FIR_8.mat';
+%=============
+% Header settings for variables, where they exist
+%
+% Get data from header 
+headerMap = containers.Map; %empty map
+headerMap = headerReadWrite(headerFile, fname_out, headerMap); 
+
+% Header size 
+if isKey(headerMap,'HDR_SIZE') hdrsize = str2num(headerMap('HDR_SIZE')); end
+% Number of polarizations 
+if isKey(headerMap,'NPOL') npol = str2num(headerMap('NPOL')); end
+
+% Set bandwidth 
+if isKey(headerMap,'BW') f_sample_in = (-1)*str2num(headerMap('BW')); end % Samplin    g frequency of input (MHz)
+
+% Multiplying factor going from output to input type
+%
+% NDIM is 1 for real input data and 2 for complex input data
+if isKey(headerMap,'NDIM')
+    if str2num(headerMap('NDIM'))==1 dformat='realtocomplex';
+    elseif str2num(headerMap('NDIM'))==2 dformat='complextocomplex';
+    else warning('NDIM in header file should be 1 or 2.')
+    end
+end
+
+% Over-Sampling Factor
+if isKey(headerMap,'OS_FACTOR')
+    splitInput = strsplit(headerMap('OS_FACTOR'),'/'); %what if OS_FACTOR is just 1?
+    Nu = str2num(splitInput{1});
+    De = str2num(splitInput{2});
+    if (Nu == 1 && De == 1)
+        pfb_type=0; %for CSing
+    else
+        pfb_type=1; %for OSing
+    end   
+end
 
 %=======================================
 % Other parameters
-hdrsize = 4096; %Header size
 hdrtype = 'uint8'; % Data type for header ('uint8' = byte)
 ntype = 'single'; % Data type for each element in a pair ('single' = float)
-npol = 2; % Number of polarisations (should always be 2 when calc Stokes)
-dformat = 'realtocomplex'; %specifies conversion OF real or complex data
-%dformat = 'complextocomplex'; %specifies conversion OF real or complex data
-Nin = M*(2^14);  % Number of elements per input file read
-f_sample_in = 80.; % Sampling frequency of input (MHz)
 chan_no = 3; % Particular PFB output channel number to store to file
 nseries = 80; % Number of input blocks to read and process
 
 %=============
 % Initialisations
+
+% PFB prototype OS factor and filter coefficients file name
+if pfb_type == 0, % Critically sampled
+    Os = 1;
+    %fname_pfb = 'CS_Prototype_FIR_8.mat';
+    fname_pfb = 'OS_Prototype_FIR_8.mat'; % Where is CS_Prototype_FIR.mat?
+else % Over sampled
+    Os = Nu/De; % Oversampling factor
+    fname_pfb = 'OS_Prototype_FIR_8.mat';
+end;
+
+% Number of channels in filter-bank
+L= 16;
+M = L/Os; % Commutator Length
+L_M = L-M; % Overlap
+Nin = M*(2^14);  % Number of elements per input file read
+
 
 % Set up parameters depending on whether incoming data is real or complex
 switch dformat
@@ -111,20 +168,30 @@ switch dformat
     otherwise
         warning('Conversion should be realtocomplex or complextocomplex.');
 end
+  
+
+%==============
+% Fill up the header completely by appending null characters, \0
+
+% Get current size of output file (just the header so far)
+hdrfile=dir(fname_out);
+hdr_currentsize=hdrfile.bytes;
+
+% Append the remainder as nulls
+fid_out = fopen(fname_out, 'a');
+for i=1:(hdrsize-hdr_currentsize)
+    fprintf(fid_out,'\0');
+end
+fclose(fid_out);
+
+%==============
+% Prepare for main loop
 
 % Open input file
 fid_in = fopen(fname_in);
- 
-% Read header
-fread(fid_in, hdrsize, hdrtype);
-%disp(transpose(native2unicode(hdr))); % Show header
 
-% Open file for writing
-fid_out = fopen(fname_out, 'w');
-
-% Write header
-hdr = zeros(hdrsize,1);
-fwrite(fid_out, hdr, hdrtype);
+% Open output file
+fid_out = fopen(fname_out, 'a');
 
 % Initialise output
 y2 = zeros(npol,L,Nin/M);
@@ -207,10 +274,12 @@ end;
 
 fclose(fid_in);
 fclose(fid_out);
+  
  
 return
-end
 
+exit();
+end
 
 
 
@@ -517,3 +586,72 @@ n = mod(n,Nu);
  
 end %Function OS_PFB_2
 
+
+% Function to pull observation parameters from a header file
+% Also adjusts the TSAMP value to account for Over-Sampling and writes a new header
+function headerMap = headerReadWrite(headerFile, fname_out, headerMap)
+
+if exist(headerFile, 'file')
+    fInputHeaderFile = fopen(headerFile, 'r');
+    fid_out = fopen(fname_out, 'a');
+    formatSpec = '%c'; %collects all chars
+    headerString = fscanf(fInputHeaderFile, formatSpec);
+    headerLines = strsplit(headerString, '\n'); 
+    
+    for i=1:length(headerLines)
+        % Map parameter names to values
+        tempMap = strsplit(headerLines{i}); % Parse lines along whitespace
+
+        % Only consider meaningful lines
+        if length(tempMap) > 1
+            headerMap(tempMap{1}) = tempMap{2};
+       
+            % TSAMP must be rescaled before appending
+            new_line = strcat(headerLines{i},'\n');
+            if strcmp(tempMap{1},'TSAMP')
+                % Default, if any of TSAMP, NCHAN, OS_FACTOR don't exist
+                tsamp_line = new_line;
+            else % All lines that are not TSAMP
+                fprintf(fid_out, new_line);
+            end
+        end
+    end
+
+    % Get TSAMP, NCHAN, OS_FACTOR as numbers
+    if isKey(headerMap,'TSAMP')
+        tsamp_val = str2num(headerMap('TSAMP'));
+
+        % Defaults
+        nchan_val = 8; 
+            % PFB downsamples by 8, only outputs 1 of the channels, 
+            % DSPSR only sees 1 channel, so we can't use NCHAN in the header 
+        Nu_val = 1;
+        De_val = 1; 
+      
+        % Number of Channels   
+        if isKey(headerMap,'NCHAN') 
+            nchan_val = str2num(headerMap('NCHAN'));
+        end
+
+        % Over-Sampling Factor
+        if isKey(headerMap,'OS_FACTOR')
+            splitInput = strsplit(headerMap('OS_FACTOR'),'/'); 
+            Nu_val = str2num(splitInput{1});
+            De_val = str2num(splitInput{2});
+        end
+
+        % Fix TSAMP and append
+        digitsOld = digits(10); %Increase precision to 10 digits
+        tsamp_val = vpa(tsamp_val*nchan_val*De_val/Nu_val); % TSAMP*NCHAN/OS_FACTOR
+        tsamp_line = ['TSAMP' '        ' char(tsamp_val) '\n'];
+    end
+
+    % Append TSAMP onto output header
+    fprintf(fid_out, tsamp_line);
+  
+    fclose(fInputHeaderFile);
+    fclose(fid_out);
+end
+
+return
+end % Function headerReadWrite

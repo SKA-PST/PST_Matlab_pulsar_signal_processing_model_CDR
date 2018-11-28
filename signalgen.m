@@ -6,6 +6,7 @@ function signalgen()
 % DATA SETTINGS
 %
 % fname     - Ouput filename
+% headerFile - A dada-style pulsar data header file 
 % hdrsize   - Header size
 % hdrtype   - Data type for header ('uint8' = byte)
 % ntype     - Data type for each element in a pair ('single' = float)
@@ -47,46 +48,84 @@ function signalgen()
 % D. Hicks         04-Jul-2014  Original version
 % I. Morrison      31-Jul-2015  Added noise parameter
 %                               Added optional fftshift before inverse FFT
+% R. Willcox       07-Sep-2018  Added header read-in
 % ----------------------------------------------------------------------
  
 %=============
  
 fname = 'simulated_pulsar.dump';
+headerFile = 'gen.header'; %Use a better name
 
-hdrsize = 4096; % Header size
+%=============
+% Default settings for variables that might be found in a header file
+
+hdrsize = 4096; % Header size 
+npol = 2; % Number of polarizations (should always be 2 when calc Stokes) 
+f0 = 1405; % Centre frequency (MHz)
+T_pulsar = .00575745; % Pulsar period
+
+% Set bandwidth - default is 8 x 10 MHz, for testing with 8-channel channelizer
+f_sample_out = 80; % Sampling frequency of output (MHz)
+
+% Multiplying factor going from input to output type
+dformat = 'complextoreal'; %specifies conversion TO real or complex data
+%dformat = 'complextocomplex'; %specifies conversion TO real or complex data
+
+%=============
+% Header settings for variables, where they exist
+%
+% Get data from header 
+headerMap = containers.Map; %empty map
+headerMap = headerReadIn(headerFile, headerMap); 
+
+% Header size 
+if isKey(headerMap,'HDR_SIZE') hdrsize = str2num(headerMap('HDR_SIZE')); end 
+% Number of polarizations 
+if isKey(headerMap,'NPOL') npol = str2num(headerMap('NPOL')); end
+% Centre frequency (MHz)
+if isKey(headerMap,'FREQ') f0 = str2num(headerMap('FREQ')); end
+% Pulsar period
+if isKey(headerMap, 'CALFREQ') T_pulsar = 1.0/str2num(headerMap('CALFREQ')); end 
+
+% Set bandwidth 
+if isKey(headerMap,'BW') f_sample_out = (-1)*str2num(headerMap('BW')); end % Sampling frequency of output (MHz)
+
+% Multiplying factor going from input to output type
+%
+% NDIM is 1 for real output data and 2 for complex output data
+if isKey(headerMap,'NDIM') 
+    if str2num(headerMap('NDIM'))==1 dformat='complextoreal';
+    elseif str2num(headerMap('NDIM'))==2 dformat='complextocomplex'; 
+    else warning('NDIM in header file should be 1 or 2.')
+    end
+end
+
+%=============
+% Data which is not specified in the header
+
+% Data settings
 hdrtype = 'uint8'; % Data type for header ('uint8' = byte)
 ntype = 'single'; % Data type for each element in a pair ('single' = float)
 Nout = 2^20; %Length of each output vector
 nbins = 2^10; % Number of bins within a pulse period
-npol = 2; % Number of polarizations (should always be 2 when calc Stokes)
 nseries = 30; % Number of FFT's to perform
-noise = 0.0;  % 0.0 for no noise, 1.0 for noise (max(S/N)=1)
-dformat = 'complextoreal'; %specifies conversion TO real or complex data
-%dformat = 'complextocomplex'; %specifies conversion TO real or complex data
+noise = 0.5;  % 0.0 for no noise, 1.0 for noise (max(S/N)=1)
 shift = 0; % performs an fftshift before the inverse FFT
- 
-% Instrument settings
-f0 = 1405.; % Centre frequency (MHz)
-
-% Set bandwidth to 8 x 10 MHz, for testing with 8-channel channelizer
-f_sample_out = 80.; % Sampling frequency of output (MHz)
+switch dformat
+    case 'complextoreal' 
+        Nmul = 2; 
+    case 'complextocomplex' 
+        Nmul = 1;
+    otherwise 
+        warning('Conversion should be complextoreal or complextocomplex.')
+end
 
 % Pulsar settings
 Dconst = 4.148804E3; % s.MHz^2/(pc/cm^3)
 DM = 2.64476; % pc/cm^3
-pcal = struct('a',0.00575745,'b',0.0);% Pulsar period (s) and other params
+%DM = 2.64476*40; % pc/cm^3
+pcal = struct('a',T_pulsar,'b',0.0);% Pulsar period (s) and other params
 t0 = 0.0; % Absolute time (in seconds) of first time element 
- 
-%===============
-%Multiplying factor going from input to output type
-switch dformat
-    case 'complextoreal'
-        Nmul = 2; 
-    case 'complextocomplex'
-        Nmul = 1;
-    otherwise
-        warning('Conversion should be complextoreal or complextocomplex.');
-end;
  
 Tout = 1/abs(f_sample_out)*1E-6; % Sample spacing of output (seconds)
 df = f_sample_out/Nmul; % Bandwidth/Nyquist frequency (MHz)
@@ -97,7 +136,7 @@ Pmul = 1/Nmul; % Power multiplication factor for all but the DC channel
 %===============
 % Create the dispersion kernel and determine the number of elements to be
 % clipped off the beginning and end.
-frange = [-df/2, df/2] + f0
+frange = [-df/2, df/2] + f0;
  
 % Get matrix to perform dispersion on complex array
 [H, ~, n_hi, n_lo] = ...
@@ -112,6 +151,7 @@ frac_lost = (n_lo + n_hi)/Nin; % fraction of array that's lost
 fprintf('Lost fraction of time series = %f\n', frac_lost);
 fprintf('Time series length = %f s\n', nclip_in*Tin);
 
+
 %===============
 % Calculate phase-dependent Stokes parameters and coherency matrix
 % using the rotating vector model
@@ -124,13 +164,11 @@ trel = (0:Nin-1)*Tin;
 % Open file for writing
 fid = fopen(fname, 'w');
 
-% Write header
-hdr = zeros(hdrsize,1);
-fwrite(fid, hdr, hdrtype);
- 
+%=============
+% Random vectors
 for ii = 1:nseries,
     % Print loop number
-    fprintf('Loop # %i of %i\n', ii, nseries);
+    fprintf('Loop # %i of %i\n', ii, nseries)
     
     % Time vector
     if ii == 1,
@@ -223,7 +261,8 @@ end;
  
 fclose(fid);
 return
- 
+
+exit(); 
 end
 
 
@@ -238,6 +277,7 @@ end;
 esig = 5. ; % emission half angle (polar angle, degrees)
 epeak = 0. ; % emission peak angle (polar angle, degrees)
 flin = 0.3; % linear polarized fraction amplitude
+%flin = 1; % linear polarized fraction amplitude % Reinhold test
  
 zeta = 30.; % observing angle (degrees) relative to rotation axis
 alpha = 40.; % magnetic axis (degrees) relative to rotation axis
@@ -328,5 +368,34 @@ end;
  
 S = [S0, S1, S2, S3];
 J = [Jxx, Jyx, Jxy, Jyy];
+return
+end
+
+
+% Function to pull observation parameters from a header file
+function headerMap = headerReadIn(headerFile, headerMap)
+% This reads a header file typical of pulsar observations
+% (dada, cspsr2, etc.) and parses the parameters found there.  
+% When the .dump file is prepared, the header and .dump 
+% files should be catted together with a buffer of nulls to
+% fill up the the header, before being read into DSPSR
+
+if exist(headerFile, 'file')
+    'The header file was found'
+    fheaderFile = fopen(headerFile, 'r');
+    formatSpec = '%c'; %collects all chars
+    headerString = fscanf(fheaderFile, formatSpec);
+    headerLines = strsplit(headerString, '\n'); % output is a row vector where each element is a line from the header file
+    
+    for i=1:length(headerLines)
+       tempMap = strsplit(headerLines{i}); % Parse lines along whitespace
+       if length(tempMap) > 1
+          headerMap(tempMap{1}) = tempMap{2};
+       end
+    end
+    fclose(fheaderFile);
+else
+    'The header file was not found'
+end
 return
 end
